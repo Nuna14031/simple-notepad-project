@@ -1,0 +1,389 @@
+name: Build and Test
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build-and-test:
+    runs-on: self-hosted
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Test if the Correct '.gitignore' File is Present
+      run: |
+        # Check '.gitignore'
+        if [ ! -f '.gitignore' ]
+        then
+          echo -e "The '.gitignore' file is missing."
+          exit 1
+        fi
+        if ! grep --quiet 'out' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `out` directory.'
+          exit 1
+        fi
+        if ! grep --quiet 'build' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `build` directory.'
+          exit 1
+        fi
+        if ! grep --quiet 'cmake-build-' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `cmake-build-*` directory pattern.'
+          exit 1
+        fi
+        if ! grep --quiet '\.idea' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `.idea` directory.'
+          exit 1
+        fi
+        if ! grep --quiet 'notepad' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `notepad` executable mentioned.'
+          exit 1
+        fi
+        if ! grep --quiet 'test_exceptions' '.gitignore'
+        then
+          echo -e 'The '\''.gitignore'\'' file does not have the `test_exceptions` executable mentioned.'
+          exit 1
+        fi
+
+    - name: Test if the 'CMakeLists.txt' File is Present
+      run: |
+        # Check 'CMakeLists.txt'
+        if [ ! -f 'CMakeLists.txt' ]
+        then
+          echo -e "The 'CMakeLists.txt' file is missing."
+          exit 1
+        fi
+
+    - name: Test if the Required Source Files are Present
+      run: |
+        # Check source files
+        for file in main.cpp main_window.h main_window.cpp text_transform.h find_replace_dialog.ui word_frequency_dialog.ui notepad_exception.h test_exceptions.cpp
+        do
+          if [ ! -f "$file" ]
+          then
+            echo -e "The '$file' file is missing."
+            exit 1
+          fi
+        done
+
+    - name: Test if the 'CMakeLists.txt' Has the Required Build Rules
+      run: |
+        # Check 'CMakeLists.txt'
+        if ! grep --quiet 'notepad' 'CMakeLists.txt'
+        then
+          echo -e "The 'CMakeLists.txt' file does not have the 'notepad' build rule."
+          exit 1
+        fi
+        if ! grep --quiet 'test_exceptions' 'CMakeLists.txt'
+        then
+          echo -e "The 'CMakeLists.txt' file does not have the 'test_exceptions' build rule."
+          exit 1
+        fi
+
+    - name: Test if the Source Code Style is Consistent
+      run: |
+        # Check style
+        for file in main.cpp main_window.h main_window.cpp text_transform.h notepad_exception.h test_exceptions.cpp
+        do
+          if ! clang-format --dry-run --Werror --ferror-limit '0' --style 'file' "$file"
+          then
+            echo -e "The '$file' file is not formatted consistently with the '.clang-format' configuration."
+            exit 1
+          fi
+        done
+
+    - name: Configure the Project with CMake
+      run: |
+        # Configure with 'CMakeLists.txt'
+        export CXXFLAGS='-fsanitize=address -fsanitize=leak -fsanitize=undefined'
+        cmake -B "${{github.workspace}}/build" -D 'CMAKE_BUILD_TYPE=Release'
+
+    - name: Compile the 'notepad' Target
+      run: |
+        # Build with 'CMakeLists.txt'
+        export CXXFLAGS='-fsanitize=address -fsanitize=leak -fsanitize=undefined'
+        cmake --build "${{github.workspace}}/build" --config 'Release' --target 'notepad'
+
+    - name: Compile the 'test_exceptions' Target
+      run: |
+        # Build with 'CMakeLists.txt'
+        export CXXFLAGS='-fsanitize=address -fsanitize=leak -fsanitize=undefined'
+        cmake --build "${{github.workspace}}/build" --config 'Release' --target 'test_exceptions'
+
+    - name: Test if 'test_exceptions' Produces the Correct Output
+      run: |
+        # Run and Test 'test_exceptions'. Note that even a difference of a single whitespace character may be considered a failure.
+        TARGET='test_exceptions'
+
+        if [ ! -f "./build/$TARGET" ]
+        then
+          echo -e "The '$TARGET' executable is missing."
+          exit 1
+        fi
+
+        read -r -d '' CORRECT_OUTPUT <<-'EOF' || true
+        Test 1: Single catch
+        Caught notepad_exception: File not found: 'missing.txt'
+
+        Test 2: Multiple catches
+        Test 2a: Caught file_not_found_exception: File not found: 'missing.txt'
+        Test 2b: Caught notepad_exception: Failed to read file: 'corrupt.dat'
+        Test 2c: Caught std::exception: Unknown error
+
+        Test 3: Rethrow
+        Inner catch in open_file: File not found: 'missing.txt'
+        Rethrowing...
+        Outer catch in main: File not found: 'missing.txt'
+
+        EOF
+
+        OUTPUT="$("./build/$TARGET")"
+        if [ $? -ne 0 ]
+        then
+          echo -e "The program '$TARGET' failed to run successfully."
+          exit 1
+        fi
+
+        if ! diff --strip-trailing-cr <(echo "$OUTPUT") <(echo "$CORRECT_OUTPUT") &>/dev/null
+        then
+          echo -e "The program '$TARGET' failed to generate the correct output (at least a single or more characters are not exact).\n\n" \
+                  'The program output:\n\n' \
+                  '```\n'                   \
+                  "$OUTPUT"                 \
+                  '\n```\n\n'               \
+                  'The correct output:\n\n' \
+                  '```\n'                   \
+                  "$CORRECT_OUTPUT"         \
+                  '\n```\n\n'               \
+                  'The diff:\n\n'           \
+                  '```diff' | sed 's/^ *//g'
+          diff --strip-trailing-cr <(echo "$OUTPUT") <(echo "$CORRECT_OUTPUT")
+          echo -e '\n```\n' | sed 's/^ *//g'
+          exit 1
+        fi
+
+        echo -e "The program '$TARGET' successfully generated the correct output."
+
+    - name: Test the 'notepad' Application
+      run: |
+        # Test the 'notepad' application
+        TARGET='notepad'
+        WORKDIR=$(mktemp --directory "${RUNNER_TEMP}/notepad_test_XXXXXX")
+        SCREENSHOTS="$WORKDIR/screenshots"
+        DISPLAY_NUM=":$((RANDOM % 900 + 100))"
+        FAILURES=0
+        STEP=0
+
+        cleanup() {
+            [ -d "$TESTFILES/readonly_dir" ] && chmod 755 "$TESTFILES/readonly_dir" 2>/dev/null || true
+            [ -f "$TESTFILES/locked.txt" ]   && chmod 644 "$TESTFILES/locked.txt"   2>/dev/null || true
+            [ -f "$TESTFILES/writable.txt" ] && chmod 644 "$TESTFILES/writable.txt" 2>/dev/null || true
+            [ -n "$APP_PID" ]  && kill "$APP_PID"  2>/dev/null || true
+            [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        pass() { echo -e "$1"; }
+        fail() { echo -e "$1"; FAILURES=$((FAILURES + 1)); }
+
+        snap() {
+            STEP=$((STEP + 1))
+            import -window root "$SCREENSHOTS/$(printf '%02d' "$STEP")_$1.png" 2>/dev/null || true
+            sleep 0.3
+        }
+
+        find_wid() {
+            local wid name
+            for wid in $(xdotool search --name 'Notepad' 2>/dev/null)
+            do
+                name=$(xdotool getwindowname "$wid" 2>/dev/null || true)
+                case "$name" in
+                    Notepad*) echo "$wid"; return 0 ;;
+                esac
+            done
+            return 1
+        }
+
+        title() { local w; w=$(find_wid) && xdotool getwindowname "$w" 2>/dev/null; }
+
+        focus() {
+            local w
+            w=$(find_wid) || return 1
+            xdotool windowactivate --sync "$w" 2>/dev/null || true
+            xdotool windowfocus --sync "$w" 2>/dev/null || true
+            sleep 0.5
+        }
+
+        menu_click() {
+            xdotool mousemove --window "$1" "$2" "$3"
+            sleep 0.2
+            xdotool click --window "$1" 1
+            sleep 0.8
+        }
+
+        file_open()   { focus || true; local w; w=$(find_wid); menu_click "$w" 20 8; menu_click "$w" 60 53; }
+        file_save()   { focus || true; local w; w=$(find_wid); menu_click "$w" 20 8; menu_click "$w" 60 75; }
+        file_saveas() { focus || true; local w; w=$(find_wid); menu_click "$w" 20 8; menu_click "$w" 60 97; }
+
+        wait_dialog() {
+            local wid
+            wid=$(timeout 10 xdotool search --sync --name "$1" 2>/dev/null | head -1)
+            if [ -z "$wid" ]
+            then
+                fail "The '$TARGET' dialog '$1' did not appear."
+                return 1
+            fi
+            xdotool windowactivate --sync "$wid" 2>/dev/null || true
+            xdotool windowfocus --sync "$wid" 2>/dev/null || true
+            sleep 0.5
+            [ -n "$2" ] && snap "$2"
+            return 0
+        }
+
+        dialog_type() {
+            xdotool key ctrl+a
+            sleep 0.2
+            xdotool type --delay 50 "$1"
+            sleep 0.5
+            xdotool key Return
+            sleep 1
+        }
+
+        wait_no_dialog() {
+            local name="$1" i
+            for ((i = 0; i < 20; i++))
+            do
+                xdotool search --name "$name" 2>/dev/null | head -1 | grep --quiet . || return 0
+                sleep 0.3
+            done
+        }
+
+        if [ ! -f "./build/$TARGET" ]
+        then
+            echo -e "The '$TARGET' executable is missing."
+            exit 1
+        fi
+
+        mkdir -p "$SCREENSHOTS"
+
+        TESTFILES="$WORKDIR/files"
+        mkdir --parents "$TESTFILES"
+        echo 'locked content' > "$TESTFILES/locked.txt"
+        chmod 0 "$TESTFILES/locked.txt"
+        echo 'writable content' > "$TESTFILES/writable.txt"
+        mkdir "$TESTFILES/readonly_dir"
+        chmod 555 "$TESTFILES/readonly_dir"
+
+        Xvfb "$DISPLAY_NUM" -screen 0 800x600x24 &
+        XVFB_PID=$!
+        sleep 2
+
+        export DISPLAY="$DISPLAY_NUM"
+        export QT_QPA_PLATFORM=xcb
+        echo 'leak:libdbus' > "$WORKDIR/lsan.supp"
+        export LSAN_OPTIONS="suppressions=$WORKDIR/lsan.supp"
+        export XDG_RUNTIME_DIR="$WORKDIR/runtime"
+        mkdir -m 0700 -p "$XDG_RUNTIME_DIR"
+
+        "./build/$TARGET" &
+        APP_PID=$!
+        sleep 3
+
+        timeout 10 xdotool search --sync --name 'Notepad' >/dev/null 2>&1 || true
+        sleep 1
+        WID=$(find_wid)
+        if [ -z "$WID" ]
+        then
+            echo -e "The '$TARGET' window was not found."
+            exit 1
+        fi
+
+        T=$(title)
+        if [ "$T" = 'Notepad' ]
+        then
+            pass "The '$TARGET' window title is correct."
+        else
+            fail "The '$TARGET' window title is '$T', expected 'Notepad'."
+        fi
+        snap 'window'
+
+        set +e
+        file_open
+        if wait_dialog 'Open File' 'open_locked'
+        then
+            dialog_type "$TESTFILES/locked.txt"
+            if wait_dialog '^Error$' 'error_file_read_open'
+            then
+                pass "The '$TARGET' opened the 'Error' dialog when reading a file with no read permission."
+                xdotool key Return
+                sleep 0.5
+            else
+                fail "The '$TARGET' did not open the 'Error' dialog when reading a file with no read permission."
+            fi
+        fi
+        wait_no_dialog 'Error'; focus || true
+
+        file_open
+        if wait_dialog 'Open File' 'open_then_lock'
+        then
+            dialog_type "$TESTFILES/writable.txt"
+            sleep 1
+            chmod 0 "$TESTFILES/writable.txt"
+            file_save
+            if wait_dialog '^Error$' 'error_file_write_save'
+            then
+                pass "The '$TARGET' opened the 'Error' dialog when saving to a file with no write permission."
+                xdotool key Return
+                sleep 0.5
+            else
+                fail "The '$TARGET' did not open the 'Error' dialog when saving to a file with no write permission."
+            fi
+        fi
+        chmod 644 "$TESTFILES/writable.txt"
+        wait_no_dialog 'Error'; focus || true
+
+        file_saveas
+        if wait_dialog 'Save File As' 'saveas_readonly'
+        then
+            dialog_type "$TESTFILES/readonly_dir/blocked.txt"
+            if wait_dialog '^Error$' 'error_file_write_saveas'
+            then
+                pass "The '$TARGET' opened the 'Error' dialog when saving into a read-only directory."
+                xdotool key Return
+                sleep 0.5
+            else
+                fail "The '$TARGET' did not open the 'Error' dialog when saving into a read-only directory."
+            fi
+        fi
+        chmod 755 "$TESTFILES/readonly_dir"
+        wait_no_dialog 'Error'; wait_no_dialog 'Save File As'; focus || true
+        set -e
+
+        echo "screenshots=$SCREENSHOTS" >> "$GITHUB_OUTPUT"
+        echo "workdir=$WORKDIR" >> "$GITHUB_OUTPUT"
+        if [ "$FAILURES" -gt 0 ]
+        then
+            echo -e "The '$TARGET' application failed $FAILURES test(s)."
+            exit 1
+        fi
+        echo -e "The '$TARGET' application passed all tests."
+      id: gui_test
+
+    - name: Upload Screenshots
+      uses: actions/upload-artifact@v6
+      if: always() && steps.gui_test.outputs.screenshots != ''
+      with:
+        name: screenshots
+        path: ${{steps.gui_test.outputs.screenshots}}/
+        if-no-files-found: warn
+
+    - name: Clean Up
+      if: always()
+      run: rm -rf "${{steps.gui_test.outputs.workdir}}"
