@@ -9,14 +9,17 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFont>
+#include <QFontDialog>
 #include <QHeaderView>
 #include <QKeySequence>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QStatusBar>
 #include <QTableWidgetItem>
+#include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextDocument>
 #include <QTextStream>
@@ -42,17 +45,31 @@ main_window::main_window()
     transforms.push_back(std::make_unique<sentence_case_transform>());
     transforms.push_back(std::make_unique<swap_case_transform>());
 
+    // Setup spell checker highlighter
+    spell_highlighter = new spell_checker_highlighter(checker, editor->document());
+
+    // Right-click context menu for spell suggestions
+    editor->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(editor, &QTextEdit::customContextMenuRequested,
+        this, &main_window::show_context_menu);
+
     setup_file_menu();
     setup_edit_menu();
     setup_format_menu();
     setup_format_toolbar();
     setup_search_menu();
     setup_tools_menu();
+    setup_view_menu();
 
     update_status_bar();
+    update_recent_files_menu();
 }
 
 main_window::~main_window() = default;
+
+// ---------------------------------------------------------------------------
+// Menu setup
+// ---------------------------------------------------------------------------
 
 void main_window::setup_file_menu()
 {
@@ -81,6 +98,11 @@ void main_window::setup_file_menu()
     connect(action_save_as, &QAction::triggered, this, [this] {
         save_file_as();
     });
+
+    file_menu->addSeparator();
+
+    // Recent Files submenu
+    recent_files_menu = file_menu->addMenu("Recent Files");
 
     file_menu->addSeparator();
 
@@ -130,6 +152,43 @@ void main_window::setup_edit_menu()
 void main_window::setup_format_menu()
 {
     auto* format_menu = menuBar()->addMenu("Format");
+
+    // Font dialog
+    const auto* action_font = format_menu->addAction("Font...");
+    connect(action_font, &QAction::triggered, this, [this] {
+        auto cursor = editor->textCursor();
+        const QFont current_font = cursor.hasSelection()
+            ? cursor.charFormat().font()
+            : editor->font();
+
+        bool ok = false;
+        const QFont selected_font = QFontDialog::getFont(&ok, current_font, this, "Font");
+        if (!ok) {
+            return;
+        }
+
+        if (cursor.hasSelection()) {
+            // Apply only to the selected text
+            QTextCharFormat fmt;
+            fmt.setFont(selected_font);
+            cursor.mergeCharFormat(fmt);
+            editor->setTextCursor(cursor);
+        } else {
+            // No selection — apply to the whole document
+            editor->selectAll();
+            QTextCharFormat fmt;
+            fmt.setFont(selected_font);
+            editor->textCursor().mergeCharFormat(fmt);
+            editor->setFont(selected_font);
+            // Restore cursor without selection
+            auto restored = editor->textCursor();
+            restored.clearSelection();
+            editor->setTextCursor(restored);
+        }
+    });
+
+    format_menu->addSeparator();
+
     auto* text_case_menu = format_menu->addMenu("Text Case");
 
     for (const auto& transform : transforms) {
@@ -199,52 +258,74 @@ void main_window::setup_tools_menu()
     connect(action_word_freq, &QAction::triggered, this, [this] {
         show_word_frequency();
     });
+
+    const auto* action_spell = tools_menu->addAction("Check Spelling...");
+    connect(action_spell, &QAction::triggered, this, [this] {
+        show_spell_check();
+    });
 }
 
-void main_window::apply_transform(const text_transform& transform) const
+void main_window::setup_view_menu()
 {
-    auto cursor = editor->textCursor();
-    if (!cursor.hasSelection()) {
-        cursor.select(QTextCursor::Document);
-    }
-    const int start = cursor.selectionStart();
-    const QString selected = cursor.selectedText().replace(QChar::ParagraphSeparator, '\n');
-    const std::string original = selected.toStdString();
-    const auto result = transform.apply(original);
+    auto* view_menu = menuBar()->addMenu("View");
 
-    cursor.beginEditBlock();
-    for (std::size_t i = 0; i < result.size(); ++i) {
-        if (original[i] != result[i]) {
-            cursor.setPosition(start + static_cast<int>(i));
-            cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 1);
-            cursor.insertText(QString(QChar(result[i])), cursor.charFormat());
+    // Zoom
+    auto* action_zoom_in = view_menu->addAction("Zoom In");
+    action_zoom_in->setShortcut(QKeySequence("Ctrl++"));
+    connect(action_zoom_in, &QAction::triggered, this, [this] {
+        editor->zoomIn(2);
+        ++zoom_factor;
+    });
+
+    auto* action_zoom_out = view_menu->addAction("Zoom Out");
+    action_zoom_out->setShortcut(QKeySequence("Ctrl+-"));
+    connect(action_zoom_out, &QAction::triggered, this, [this] {
+        editor->zoomOut(2);
+        --zoom_factor;
+    });
+
+    auto* action_zoom_reset = view_menu->addAction("Reset Zoom");
+    action_zoom_reset->setShortcut(QKeySequence("Ctrl+0"));
+    connect(action_zoom_reset, &QAction::triggered, this, [this] {
+        if (zoom_factor > 0) {
+            editor->zoomOut(zoom_factor * 2);
+        } else if (zoom_factor < 0) {
+            editor->zoomIn(-zoom_factor * 2);
         }
-    }
-    cursor.endEditBlock();
+        zoom_factor = 0;
+    });
 }
 
-void main_window::open_file()
+// ---------------------------------------------------------------------------
+// File operations
+// ---------------------------------------------------------------------------
+
+void main_window::open_file(const QString& path)
 {
-    const auto path = QFileDialog::getOpenFileName(this, "Open File");
-    if (path.isEmpty()) {
+    QString resolved_path = path;
+    if (resolved_path.isEmpty()) {
+        resolved_path = QFileDialog::getOpenFileName(this, "Open File");
+    }
+    if (resolved_path.isEmpty()) {
         return;
     }
     try {
-        QFile file(path);
+        QFile file(resolved_path);
         if (!file.exists()) {
-            throw file_not_found_exception(path.toStdString());
+            throw file_not_found_exception(resolved_path.toStdString());
         }
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            throw file_read_exception(path.toStdString());
+            throw file_read_exception(resolved_path.toStdString());
         }
         QTextStream in(&file);
         const auto contents = in.readAll();
         if (in.status() != QTextStream::Ok) {
-            throw file_read_exception(path.toStdString());
+            throw file_read_exception(resolved_path.toStdString());
         }
         editor->setPlainText(contents);
-        current_file = path;
+        current_file = resolved_path;
         update_title();
+        add_to_recent_files(resolved_path);
     } catch (const notepad_exception& ex) {
         QMessageBox::critical(this, "Error", ex.what());
     }
@@ -277,6 +358,7 @@ void main_window::save_file_as()
     current_file = path;
     save_file();
     update_title();
+    add_to_recent_files(path);
 }
 
 void main_window::update_title()
@@ -288,6 +370,55 @@ void main_window::update_title()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recent Files
+// ---------------------------------------------------------------------------
+
+void main_window::add_to_recent_files(const QString& path)
+{
+    QStringList recent = settings.value("recent_files").toStringList();
+    recent.removeAll(path);
+    recent.prepend(path);
+    while (recent.size() > max_recent_files) {
+        recent.removeLast();
+    }
+    settings.setValue("recent_files", recent);
+    update_recent_files_menu();
+}
+
+void main_window::update_recent_files_menu()
+{
+    if (!recent_files_menu) {
+        return;
+    }
+    recent_files_menu->clear();
+    const QStringList recent = settings.value("recent_files").toStringList();
+
+    if (recent.isEmpty()) {
+        auto* empty_action = recent_files_menu->addAction("(empty)");
+        empty_action->setEnabled(false);
+        return;
+    }
+
+    for (const auto& path : recent) {
+        auto* action = recent_files_menu->addAction(path);
+        connect(action, &QAction::triggered, this, [this, path] {
+            open_file(path);
+        });
+    }
+
+    recent_files_menu->addSeparator();
+    auto* clear_action = recent_files_menu->addAction("Clear Recent Files");
+    connect(clear_action, &QAction::triggered, this, [this] {
+        settings.remove("recent_files");
+        update_recent_files_menu();
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
 void main_window::update_status_bar() const
 {
     const QString text = editor->toPlainText();
@@ -297,6 +428,10 @@ void main_window::update_status_bar() const
     statusBar()->showMessage(
         QString("Words: %1  Lines: %2").arg(word_count).arg(line_count));
 }
+
+// ---------------------------------------------------------------------------
+// Find / Replace
+// ---------------------------------------------------------------------------
 
 void main_window::show_find_replace_dialog()
 {
@@ -384,6 +519,10 @@ void main_window::replace_all(const QString& term, const QString& replacement,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Word Frequency
+// ---------------------------------------------------------------------------
+
 void main_window::show_word_frequency()
 {
     const auto text = editor->toPlainText().toLower().toStdString();
@@ -426,3 +565,90 @@ void main_window::show_word_frequency()
 
     dialog->exec();
 }
+
+// ---------------------------------------------------------------------------
+// Spell Check
+// ---------------------------------------------------------------------------
+
+void main_window::show_spell_check()
+{
+    if (!checker.loaded()) {
+        QMessageBox::warning(this, "Spell Checker",
+            "Dictionary not loaded. Make sure data/words.txt exists.");
+        return;
+    }
+    spell_highlighter->set_enabled(true);
+    spell_highlighter->rehighlight();
+    QMessageBox::information(this, "Spell Checker",
+        "Spell check complete. Misspelled words are underlined in red.");
+}
+
+void main_window::show_context_menu(const QPoint& pos)
+{
+    // Build standard context menu first
+    QMenu* menu = editor->createStandardContextMenu();
+
+    // Find the word under cursor
+    QTextCursor cursor = editor->cursorForPosition(pos);
+    cursor.select(QTextCursor::WordUnderCursor);
+    const QString word = cursor.selectedText();
+
+    if (!word.isEmpty() && checker.loaded() && !checker.is_correct(word.toStdString())) {
+        // Word is misspelled — add suggestions at the top
+        const auto suggestions = checker.suggestions(word.toStdString(), 5);
+
+        if (!suggestions.empty()) {
+            // Insert separator + suggestions before standard actions
+            QAction* first_action = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+
+            QAction* separator = new QAction(menu);
+            separator->setSeparator(true);
+            menu->insertAction(first_action, separator);
+
+            for (int i = static_cast<int>(suggestions.size()) - 1; i >= 0; --i) {
+                const QString suggestion = QString::fromStdString(suggestions[i]);
+                auto* sug_action = new QAction(suggestion, menu);
+                connect(sug_action, &QAction::triggered, this, [this, cursor, suggestion]() mutable {
+                    cursor.insertText(suggestion);
+                    editor->setTextCursor(cursor);
+                });
+                menu->insertAction(first_action, sug_action);
+            }
+
+            // Insert label at very top
+            auto* label_action = new QAction("Suggestions:", menu);
+            label_action->setEnabled(false);
+            menu->insertAction(menu->actions().first(), label_action);
+        }
+    }
+
+    menu->exec(editor->viewport()->mapToGlobal(pos));
+    delete menu;
+}
+
+// ---------------------------------------------------------------------------
+// Transform
+// ---------------------------------------------------------------------------
+
+void main_window::apply_transform(const text_transform& transform) const
+{
+    auto cursor = editor->textCursor();
+    if (!cursor.hasSelection()) {
+        cursor.select(QTextCursor::Document);
+    }
+    const int start = cursor.selectionStart();
+    const QString selected = cursor.selectedText().replace(QChar::ParagraphSeparator, '\n');
+    const std::string original = selected.toStdString();
+    const auto result = transform.apply(original);
+
+    cursor.beginEditBlock();
+    for (std::size_t i = 0; i < result.size(); ++i) {
+        if (original[i] != result[i]) {
+            cursor.setPosition(start + static_cast<int>(i));
+            cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 1);
+            cursor.insertText(QString(QChar(result[i])), cursor.charFormat());
+        }
+    }
+    cursor.endEditBlock();
+}
+ 
