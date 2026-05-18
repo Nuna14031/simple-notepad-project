@@ -19,7 +19,6 @@
 #include <QRegularExpression>
 #include <QStatusBar>
 #include <QTableWidgetItem>
-#include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextDocument>
 #include <QTextStream>
@@ -28,7 +27,6 @@
 #include <map>
 #include <sstream>
 #include <string>
-#include <utility>
 #include <vector>
 
 main_window::main_window()
@@ -45,13 +43,10 @@ main_window::main_window()
     transforms.push_back(std::make_unique<sentence_case_transform>());
     transforms.push_back(std::make_unique<swap_case_transform>());
 
-    // Setup spell checker highlighter
     spell_highlighter = new spell_checker_highlighter(checker, editor->document());
 
-    // Right-click context menu for spell suggestions
     editor->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(editor, &QTextEdit::customContextMenuRequested,
-        this, &main_window::show_context_menu);
+    connect(editor, &QTextEdit::customContextMenuRequested, this, &main_window::show_context_menu);
 
     setup_file_menu();
     setup_edit_menu();
@@ -66,10 +61,6 @@ main_window::main_window()
 }
 
 main_window::~main_window() = default;
-
-// ---------------------------------------------------------------------------
-// Menu setup
-// ---------------------------------------------------------------------------
 
 void main_window::setup_file_menu()
 {
@@ -101,7 +92,6 @@ void main_window::setup_file_menu()
 
     file_menu->addSeparator();
 
-    // Recent Files submenu
     recent_files_menu = file_menu->addMenu("Recent Files");
 
     file_menu->addSeparator();
@@ -153,44 +143,28 @@ void main_window::setup_format_menu()
 {
     auto* format_menu = menuBar()->addMenu("Format");
 
-    // Font dialog
     const auto* action_font = format_menu->addAction("Font...");
     connect(action_font, &QAction::triggered, this, [this] {
-        auto cursor = editor->textCursor();
-        const QFont current_font = cursor.hasSelection()
-            ? cursor.charFormat().font()
-            : editor->font();
-
         bool ok = false;
-        const QFont selected_font = QFontDialog::getFont(&ok, current_font, this, "Font");
+        QFont current_font = editor->font();
+        QFont selected_font = QFontDialog::getFont(&ok, current_font, this, "Font");
         if (!ok) {
             return;
         }
 
+        QTextCursor cursor = editor->textCursor();
         if (cursor.hasSelection()) {
-            // Apply only to the selected text
             QTextCharFormat fmt;
             fmt.setFont(selected_font);
             cursor.mergeCharFormat(fmt);
-            editor->setTextCursor(cursor);
         } else {
-            // No selection — apply to the whole document
-            editor->selectAll();
-            QTextCharFormat fmt;
-            fmt.setFont(selected_font);
-            editor->textCursor().mergeCharFormat(fmt);
             editor->setFont(selected_font);
-            // Restore cursor without selection
-            auto restored = editor->textCursor();
-            restored.clearSelection();
-            editor->setTextCursor(restored);
         }
     });
 
     format_menu->addSeparator();
 
     auto* text_case_menu = format_menu->addMenu("Text Case");
-
     for (const auto& transform : transforms) {
         const auto* action = text_case_menu->addAction(QString::fromStdString(transform->name()));
         connect(action, &QAction::triggered, this, [this, &transform] {
@@ -207,7 +181,7 @@ void main_window::setup_format_toolbar()
     auto* action_bold = toolbar->addAction(QIcon("data/images/bold.svg"), "Bold");
     action_bold->setCheckable(true);
     action_bold->setShortcut(QKeySequence("Ctrl+B"));
-    connect(action_bold, &QAction::triggered, this, [this](const bool checked) {
+    connect(action_bold, &QAction::triggered, this, [this](bool checked) {
         QTextCharFormat fmt;
         fmt.setFontWeight(checked ? QFont::Bold : QFont::Normal);
         editor->mergeCurrentCharFormat(fmt);
@@ -216,7 +190,7 @@ void main_window::setup_format_toolbar()
     auto* action_italic = toolbar->addAction(QIcon("data/images/italic.svg"), "Italic");
     action_italic->setCheckable(true);
     action_italic->setShortcut(QKeySequence("Ctrl+I"));
-    connect(action_italic, &QAction::triggered, this, [this](const bool checked) {
+    connect(action_italic, &QAction::triggered, this, [this](bool checked) {
         QTextCharFormat fmt;
         fmt.setFontItalic(checked);
         editor->mergeCurrentCharFormat(fmt);
@@ -225,7 +199,7 @@ void main_window::setup_format_toolbar()
     auto* action_underline = toolbar->addAction(QIcon("data/images/underline.svg"), "Underline");
     action_underline->setCheckable(true);
     action_underline->setShortcut(QKeySequence("Ctrl+U"));
-    connect(action_underline, &QAction::triggered, this, [this](const bool checked) {
+    connect(action_underline, &QAction::triggered, this, [this](bool checked) {
         QTextCharFormat fmt;
         fmt.setFontUnderline(checked);
         editor->mergeCurrentCharFormat(fmt);
@@ -269,19 +243,18 @@ void main_window::setup_view_menu()
 {
     auto* view_menu = menuBar()->addMenu("View");
 
-    // Zoom
     auto* action_zoom_in = view_menu->addAction("Zoom In");
     action_zoom_in->setShortcut(QKeySequence("Ctrl++"));
     connect(action_zoom_in, &QAction::triggered, this, [this] {
         editor->zoomIn(2);
-        ++zoom_factor;
+        zoom_factor++;
     });
 
     auto* action_zoom_out = view_menu->addAction("Zoom Out");
     action_zoom_out->setShortcut(QKeySequence("Ctrl+-"));
     connect(action_zoom_out, &QAction::triggered, this, [this] {
         editor->zoomOut(2);
-        --zoom_factor;
+        zoom_factor--;
     });
 
     auto* action_zoom_reset = view_menu->addAction("Reset Zoom");
@@ -296,36 +269,32 @@ void main_window::setup_view_menu()
     });
 }
 
-// ---------------------------------------------------------------------------
-// File operations
-// ---------------------------------------------------------------------------
-
 void main_window::open_file(const QString& path)
 {
-    QString resolved_path = path;
-    if (resolved_path.isEmpty()) {
-        resolved_path = QFileDialog::getOpenFileName(this, "Open File");
+    QString file_path = path;
+    if (file_path.isEmpty()) {
+        file_path = QFileDialog::getOpenFileName(this, "Open File");
     }
-    if (resolved_path.isEmpty()) {
+    if (file_path.isEmpty()) {
         return;
     }
     try {
-        QFile file(resolved_path);
+        QFile file(file_path);
         if (!file.exists()) {
-            throw file_not_found_exception(resolved_path.toStdString());
+            throw file_not_found_exception(file_path.toStdString());
         }
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            throw file_read_exception(resolved_path.toStdString());
+            throw file_read_exception(file_path.toStdString());
         }
         QTextStream in(&file);
-        const auto contents = in.readAll();
+        QString contents = in.readAll();
         if (in.status() != QTextStream::Ok) {
-            throw file_read_exception(resolved_path.toStdString());
+            throw file_read_exception(file_path.toStdString());
         }
         editor->setPlainText(contents);
-        current_file = resolved_path;
+        current_file = file_path;
         update_title();
-        add_to_recent_files(resolved_path);
+        add_to_recent_files(file_path);
     } catch (const notepad_exception& ex) {
         QMessageBox::critical(this, "Error", ex.what());
     }
@@ -351,7 +320,7 @@ void main_window::save_file()
 
 void main_window::save_file_as()
 {
-    const auto path = QFileDialog::getSaveFileName(this, "Save File As");
+    QString path = QFileDialog::getSaveFileName(this, "Save File As");
     if (path.isEmpty()) {
         return;
     }
@@ -370,16 +339,12 @@ void main_window::update_title()
     }
 }
 
-// ---------------------------------------------------------------------------
-// Recent Files
-// ---------------------------------------------------------------------------
-
 void main_window::add_to_recent_files(const QString& path)
 {
     QStringList recent = settings.value("recent_files").toStringList();
     recent.removeAll(path);
     recent.prepend(path);
-    while (recent.size() > max_recent_files) {
+    while (recent.size() > 5) {
         recent.removeLast();
     }
     settings.setValue("recent_files", recent);
@@ -392,46 +357,37 @@ void main_window::update_recent_files_menu()
         return;
     }
     recent_files_menu->clear();
-    const QStringList recent = settings.value("recent_files").toStringList();
 
+    QStringList recent = settings.value("recent_files").toStringList();
     if (recent.isEmpty()) {
-        auto* empty_action = recent_files_menu->addAction("(empty)");
-        empty_action->setEnabled(false);
+        QAction* empty = recent_files_menu->addAction("(empty)");
+        empty->setEnabled(false);
         return;
     }
 
-    for (const auto& path : recent) {
-        auto* action = recent_files_menu->addAction(path);
+    for (const QString& path : recent) {
+        QAction* action = recent_files_menu->addAction(path);
         connect(action, &QAction::triggered, this, [this, path] {
             open_file(path);
         });
     }
 
     recent_files_menu->addSeparator();
-    auto* clear_action = recent_files_menu->addAction("Clear Recent Files");
-    connect(clear_action, &QAction::triggered, this, [this] {
+    QAction* clear = recent_files_menu->addAction("Clear Recent Files");
+    connect(clear, &QAction::triggered, this, [this] {
         settings.remove("recent_files");
         update_recent_files_menu();
     });
 }
 
-// ---------------------------------------------------------------------------
-// Status bar
-// ---------------------------------------------------------------------------
-
 void main_window::update_status_bar() const
 {
-    const QString text = editor->toPlainText();
-    const QStringList words = text.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-    const int word_count = words.size();
-    const int line_count = text.isEmpty() ? 0 : text.count('\n') + 1;
-    statusBar()->showMessage(
-        QString("Words: %1  Lines: %2").arg(word_count).arg(line_count));
+    QString text = editor->toPlainText();
+    QStringList words = text.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    int word_count = words.size();
+    int line_count = text.isEmpty() ? 0 : text.count('\n') + 1;
+    statusBar()->showMessage(QString("Words: %1  Lines: %2").arg(word_count).arg(line_count));
 }
-
-// ---------------------------------------------------------------------------
-// Find / Replace
-// ---------------------------------------------------------------------------
 
 void main_window::show_find_replace_dialog()
 {
@@ -508,7 +464,7 @@ void main_window::replace_all(const QString& term, const QString& replacement,
     editor->setTextCursor(start_cursor);
 
     while (true) {
-        const auto found = editor->document()->find(term, editor->textCursor(), flags);
+        auto found = editor->document()->find(term, editor->textCursor(), flags);
         if (found.isNull()) {
             break;
         }
@@ -519,23 +475,18 @@ void main_window::replace_all(const QString& term, const QString& replacement,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Word Frequency
-// ---------------------------------------------------------------------------
-
 void main_window::show_word_frequency()
 {
-    const auto text = editor->toPlainText().toLower().toStdString();
+    QString text = editor->toPlainText().toLower();
+    std::string std_text = text.toStdString();
 
     std::map<std::string, int> freq;
-    std::istringstream stream(text);
+    std::istringstream stream(std_text);
     std::string word;
     while (stream >> word) {
-        std::erase_if(word, [](const unsigned char c) {
-            return !std::isalpha(c);
-        });
+        std::erase_if(word, [](unsigned char c) { return !std::isalpha(c); });
         if (!word.empty()) {
-            ++freq[word];
+            freq[word]++;
         }
     }
 
@@ -566,59 +517,47 @@ void main_window::show_word_frequency()
     dialog->exec();
 }
 
-// ---------------------------------------------------------------------------
-// Spell Check
-// ---------------------------------------------------------------------------
-
 void main_window::show_spell_check()
 {
     if (!checker.loaded()) {
-        QMessageBox::warning(this, "Spell Checker",
-            "Dictionary not loaded. Make sure data/words.txt exists.");
+        QMessageBox::warning(this, "Spell Checker", "Dictionary not loaded. Make sure data/words.txt exists.");
         return;
     }
-    spell_highlighter->set_enabled(true);
     spell_highlighter->rehighlight();
-    QMessageBox::information(this, "Spell Checker",
-        "Spell check complete. Misspelled words are underlined in red.");
+    QMessageBox::information(this, "Spell Checker", "Spell check complete. Misspelled words are underlined in red.");
 }
 
 void main_window::show_context_menu(const QPoint& pos)
 {
-    // Build standard context menu first
     QMenu* menu = editor->createStandardContextMenu();
 
-    // Find the word under cursor
     QTextCursor cursor = editor->cursorForPosition(pos);
     cursor.select(QTextCursor::WordUnderCursor);
-    const QString word = cursor.selectedText();
+    QString word = cursor.selectedText();
 
     if (!word.isEmpty() && checker.loaded() && !checker.is_correct(word.toStdString())) {
-        // Word is misspelled — add suggestions at the top
-        const auto suggestions = checker.suggestions(word.toStdString(), 5);
+        std::vector<std::string> suggestions = checker.suggestions(word.toStdString());
 
         if (!suggestions.empty()) {
-            // Insert separator + suggestions before standard actions
-            QAction* first_action = menu->actions().isEmpty() ? nullptr : menu->actions().first();
+            QAction* first = menu->actions().isEmpty() ? nullptr : menu->actions().first();
 
-            QAction* separator = new QAction(menu);
-            separator->setSeparator(true);
-            menu->insertAction(first_action, separator);
+            QAction* sep = new QAction(menu);
+            sep->setSeparator(true);
+            menu->insertAction(first, sep);
 
-            for (int i = static_cast<int>(suggestions.size()) - 1; i >= 0; --i) {
-                const QString suggestion = QString::fromStdString(suggestions[i]);
-                auto* sug_action = new QAction(suggestion, menu);
+            for (int i = static_cast<int>(suggestions.size()) - 1; i >= 0; i--) {
+                QString suggestion = QString::fromStdString(suggestions[i]);
+                QAction* sug_action = new QAction(suggestion, menu);
                 connect(sug_action, &QAction::triggered, this, [this, cursor, suggestion]() mutable {
                     cursor.insertText(suggestion);
                     editor->setTextCursor(cursor);
                 });
-                menu->insertAction(first_action, sug_action);
+                menu->insertAction(first, sug_action);
             }
 
-            // Insert label at very top
-            auto* label_action = new QAction("Suggestions:", menu);
-            label_action->setEnabled(false);
-            menu->insertAction(menu->actions().first(), label_action);
+            QAction* label = new QAction("Suggestions:", menu);
+            label->setEnabled(false);
+            menu->insertAction(menu->actions().first(), label);
         }
     }
 
@@ -626,29 +565,24 @@ void main_window::show_context_menu(const QPoint& pos)
     delete menu;
 }
 
-// ---------------------------------------------------------------------------
-// Transform
-// ---------------------------------------------------------------------------
-
 void main_window::apply_transform(const text_transform& transform) const
 {
     auto cursor = editor->textCursor();
     if (!cursor.hasSelection()) {
         cursor.select(QTextCursor::Document);
     }
-    const int start = cursor.selectionStart();
-    const QString selected = cursor.selectedText().replace(QChar::ParagraphSeparator, '\n');
-    const std::string original = selected.toStdString();
-    const auto result = transform.apply(original);
+    int start = cursor.selectionStart();
+    QString selected = cursor.selectedText().replace(QChar::ParagraphSeparator, '\n');
+    std::string original = selected.toStdString();
+    std::string result = transform.apply(original);
 
     cursor.beginEditBlock();
-    for (std::size_t i = 0; i < result.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(result.size()); i++) {
         if (original[i] != result[i]) {
-            cursor.setPosition(start + static_cast<int>(i));
+            cursor.setPosition(start + i);
             cursor.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 1);
             cursor.insertText(QString(QChar(result[i])), cursor.charFormat());
         }
     }
     cursor.endEditBlock();
 }
- 
